@@ -4,6 +4,8 @@ add_subdirectory(lib)
 add_executable(Server Server.cpp)
 add_executable(Client Client.cpp)
 add_executable(epollServer epollServer.cpp)
+add_executable(epollTest epollTest.cpp)
+add_executable(epollClient epollClient.cpp)
 
 set(EXTRA_LIBS get_num)
 list(APPEND EXTRA_LIBS error_functions)

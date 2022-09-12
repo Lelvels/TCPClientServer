@@ -8,13 +8,13 @@
 #include<string>
 #include<fcntl.h>
 #include<sys/epoll.h>
+#include<errno.h>
 
 #define RCVBUFSIZE 512
 #define MAX_EVENTS 10
 
 void errExit(std::string errorMsg){
     std::cerr << errorMsg << "\n";
-    return;
 }
 
 int main(int argc, char *argv[]){
@@ -58,18 +58,10 @@ int main(int argc, char *argv[]){
     }
 
     //Creating epoll
-    epfd = epoll_create(MAX_EVENTS+1);
+    epfd = epoll_create(MAX_EVENTS);
     if(epfd == -1){
         errExit("epoll create failed");
     }
-
-   /*  for(;;){
-        clntLen = sizeof(echoClntAddr);
-        if((clntSock = accept(servSock, (struct sockaddr *) &echoClntAddr, &clntLen)) < 0){
-            char err_msg[] = "bind() serv address failed !";
-            std::cerr << err_msg << std::endl;
-        }
-    } */
 
     /* Procedure:
     1. Put server socket to interesting evlist
@@ -116,14 +108,22 @@ int main(int argc, char *argv[]){
                 if(evlist[j].data.fd == servSock){
                     unsigned int clientLen = sizeof(echoClntAddr);
                     if((clntSock = accept(servSock, (struct sockaddr *) &echoClntAddr, &clientLen)) < 0){
-                    std::cerr << "Cannot accept client!" << std::endl;
+                        std::cerr << "Cannot accept client!" << errno << std::endl;
                     }
                     ev.events = EPOLLIN;
                     ev.data.fd = clntSock;
                     if(epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) == -1){
                         errExit("Cannot add client to interesting list");
+                        //TODO: Add an error reader here!
                     } else {
-                        std::cout << "Client Sock added: " + clntSock << std::endl;
+                        std::cout << "Client Sock added: " << clntSock << std::endl;
+                        // Sending message to client after connect
+                        char msg[] = "Hello from server!\0";
+                        if(send(clntSock, msg, sizeof(msg), 0) == -1){
+                            std::cerr << "Send greeting failed!" << "\n";
+                        } else {
+                            std::cout << "Send greeting response!" << "\n";
+                        }
                     }    
                 } else {
                     char echoBuffer[RCVBUFSIZE];
@@ -141,7 +141,6 @@ int main(int argc, char *argv[]){
                 if(close(evlist[j].data.fd) == -1)
                     errExit("close");
             }
-            
         }
     } while(true);
     

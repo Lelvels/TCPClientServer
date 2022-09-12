@@ -6,10 +6,8 @@
 #include<arpa/inet.h>
 #include<string.h>
 #include<string>
-#include<sys/epoll.h>
 
-#define RCVBUFSIZE 512 
-#define MAX_EVENTS 2
+#define RCVBUFSIZE 32 
 
 int creatSocket(void){
     std::cout << "Creating socket" << std::endl; 
@@ -41,7 +39,6 @@ int sendNameToServer(int clientSock, std::string userName){
 
 int main(){
     using namespace std;
-    int epfd;
 
     int clientSock = creatSocket();
     if(clientSock == -1)
@@ -53,15 +50,9 @@ int main(){
     int connectResult = connectToServer(clientSock);
     if(connectResult < 0)
     {
-        cout << "Connect to server fail!\n";
+        std::cout << "Connect to server fail!\n";
         return 1;
     }
-
-    epfd = epoll_create(MAX_EVENTS);
-    if(epfd == -1){
-        cerr << "epoll creating failed";
-    }
-
 
     //4.
     char buffer[RCVBUFSIZE];
