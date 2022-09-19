@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 project(ClientServerV2)
+
 add_subdirectory(lib)
 add_executable(Server Server.cpp)
 add_executable(Client Client.cpp)
@@ -24,3 +25,7 @@ target_include_directories(Server PUBLIC
 target_include_directories(Client PUBLIC 
                             "${PROJECT_BINARY_DIR}"
                             )
+
+
+
+

@@ -10,6 +10,8 @@
 #include<sys/epoll.h>
 #include<errno.h>
 
+#include"common.h"
+
 #define RCVBUFSIZE 512
 #define MAX_EVENTS 10
 
@@ -17,16 +19,42 @@ void errExit(std::string errorMsg){
     std::cerr << errorMsg << "\n";
 }
 
+static int 
+setnonblocking(int sockfd)
+{
+    if(fcntl(sockfd, F_SETFD, fcntl(sockfd, F_GETFD, 0), 0) | O_NONBLOCK == -1){
+        return -1;
+    }
+    return 0;
+}
+
+static void 
+epoll_ctl_add(int epfd, int fd, uint32_t events){
+    struct epoll_event ev;
+    ev.events = events;
+    ev.data.fd = fd;
+    if(epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) == -1){
+        perror("epoll_ctl() err\n");
+        exit(1);
+    }
+}
+
+static void 
+handle_message(char* buffer){
+    printf("[+] Receiving message: %s", buffer);
+}
+
 int main(int argc, char *argv[]){
-    int servSock, clntSock;
+    int serverSocket, clientSocket;
     struct sockaddr_in echoServAddr;
     struct sockaddr_in echoClntAddr;
     unsigned short echoServPort;
     unsigned int clntLen;
 
-    int epfd, ready, fd, s, j, numOpenFds;
+    int epfd, ready, buf_size, numFDs = 0;
     struct epoll_event ev;
     struct epoll_event evlist[MAX_EVENTS];
+    char buf[RCVBUFSIZE];
 
     // Check if the number of args is enough
     if(argc != 2){
@@ -36,11 +64,11 @@ int main(int argc, char *argv[]){
     
     echoServPort = atoi(argv[1]); /* Taking port number from args */
 
-    if((servSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0){ /* Creating server socket */ 
+    if((serverSocket = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0){ /* Creating server socket */ 
         errExit("Create socket() failed!\n");
     }
     const int enable = 1;
-    if (setsockopt(servSock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0){
+    if (setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0){
         errExit("setsockopt(SO_REUSEADDR) failed");
     }
 
@@ -49,11 +77,12 @@ int main(int argc, char *argv[]){
     echoServAddr.sin_addr.s_addr = htonl(INADDR_ANY);
     echoServAddr.sin_port = htons(echoServPort);
     
-    if(bind(servSock, (struct sockaddr *) &echoServAddr, sizeof(echoServAddr)) < 0){
+    if(bind(serverSocket, (struct sockaddr *) &echoServAddr, sizeof(echoServAddr)) < 0){
         errExit("bind() serv address failed !");
     }
 
-    if(listen(servSock, MAX_EVENTS) < 0){
+    setnonblocking(serverSocket);
+    if(listen(serverSocket, MAX_EVENTS) < 0){
         errExit("listen() serv address failed !");
     }
 
@@ -69,80 +98,61 @@ int main(int argc, char *argv[]){
     3. When it ready, check what is the event ?
     4. Check the event */
 
-    /* 1. Add server to interesting list */
-    ev.events = EPOLLIN;
-    ev.data.fd = servSock;
-    if(epoll_ctl(epfd, EPOLL_CTL_ADD, servSock, &ev) == -1){
-        errExit("epoll_ctl");
-    }
-
+    /* 1. Add server socket to interesting list */
+    epoll_ctl_add(epfd, serverSocket, EPOLLIN | EPOLLOUT | EPOLLET);
+    
     do {
         /* Fetch up to MAX_EVENT items from the ready list */
         printf("About to epoll_wait()\n");
         ready = epoll_wait(epfd, evlist, MAX_EVENTS, -1);
-        if(ready == -1){
-            if(errno == EINTR)
-                continue;
-            else 
-                errExit("epoll_wait");
+        if(ready == -1){ 
+            errExit("epoll_wait() error");
         }
 
-        printf("Ready: %d\n", ready);
+        printf("[+] Ready events: %d\n", ready);
 
-        /* Deal with returned list of events */
-        for(j = 0; j < ready; j++){
-            printf("fd=%d; events: %s%s%s\n", evlist[j].data.fd,
-                (evlist[j].events & EPOLLIN) ? "EPOLLIN " : "",
-                (evlist[j].events & EPOLLHUP) ? "EPOLLHUP " : "",
-                (evlist[j].events & EPOLLERR) ? "EPOLLERR " : "");
-            /*  After waiting, epoll create an event list that contain all the event that it listen on the interesting list
-                
-                If there is no connection to the server, then it will only listen to the server socket, which only accept!
-
-                When there is an connection comes in, the server will accepts this then return a file descriptor of the client.
-                We will add this to the monitor, to manage this client socket.
-                    EPOLLIN: The associated file is available for read(2) operations.
-                    EPOLLHUP | EPOLLERR: If EPOLLIN and EPOLLHUP were both set, then there might be more than MAX_BUF bytes to read. Therefore, we close the file descriptor only if EPOLLIN was not set. We'll read further bytes after the next epoll_wait().
-            */
-            if(evlist[j].events & EPOLLIN){
-                if(evlist[j].data.fd == servSock){
-                    unsigned int clientLen = sizeof(echoClntAddr);
-                    if((clntSock = accept(servSock, (struct sockaddr *) &echoClntAddr, &clientLen)) < 0){
-                        std::cerr << "Cannot accept client!" << errno << std::endl;
-                    }
-                    ev.events = EPOLLIN;
-                    ev.data.fd = clntSock;
-                    if(epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) == -1){
-                        errExit("Cannot add client to interesting list");
-                        //TODO: Add an error reader here!
-                    } else {
-                        std::cout << "Client Sock added: " << clntSock << std::endl;
-                        // Sending message to client after connect
-                        char msg[] = "Hello from server!\0";
-                        if(send(clntSock, msg, sizeof(msg), 0) == -1){
-                            std::cerr << "Send greeting failed!" << "\n";
-                        } else {
-                            std::cout << "Send greeting response!" << "\n";
-                        }
-                    }    
+        for(int i = 0; i< ready; i++){
+            printf("[+] Getting event fd=%d; events: %s%s%s\n", evlist[i].data.fd,
+                (evlist[i].events & EPOLLIN) ? "EPOLLIN " : "",
+                (evlist[i].events & EPOLLHUP) ? "EPOLLHUP " : "",
+                (evlist[i].events & EPOLLERR) ? "EPOLLERR " : "");
+            if(evlist[i].data.fd == serverSocket){
+                unsigned int clientLen = sizeof(echoClntAddr);
+                if((clientSocket = accept(serverSocket, (struct sockaddr *) &echoClntAddr, &clientLen)) < 0){
+                    std::cerr << "Cannot accept client!" << errno << std::endl;
                 } else {
-                    char echoBuffer[RCVBUFSIZE];
-                    int clientSocket = evlist[j].data.fd;
-                    int recvMsgSize = 0;
-                    if((recvMsgSize = recv(clientSocket, echoBuffer, RCVBUFSIZE, 0)) < 0){
-                        char err_msg[] = "recv() failed!"; 
-                        std::cerr << err_msg << std::endl;
-                    } else {
-                        std::cout << "Receiving: " << echoBuffer << "\n";
-                    }
+                    printf("[+] Accept client on fd: %d", clientSocket);
                 }
-            } else if(evlist[j].events & (EPOLLHUP || EPOLLERR)){
-                printf(" closing fd %d\n", evlist[j].data.fd);
-                if(close(evlist[j].data.fd) == -1)
-                    errExit("close");
+                inet_ntop(AF_INET, (char *)&(echoClntAddr.sin_addr),
+					buf, sizeof(echoClntAddr));
+				printf(", connected with %s:%d\n", buf,
+				       ntohs(echoClntAddr.sin_port));
+                setnonblocking(clientSocket);
+                epoll_ctl_add(epfd, clientSocket, EPOLLIN | EPOLLET | EPOLLRDHUP | EPOLLHUP);
+                numFDs++;
+            } else if(evlist[i].events & EPOLLIN){
+                bzero(buf, sizeof(buf));
+                buf_size = read(evlist[i].data.fd, buf, sizeof(buf));
+                if(buf_size <= 0){
+                    break;
+                } else {
+                    handle_message(buf);
+                    write(evlist[i].data.fd, "200\0", 4);
+                }
+            } else {
+                printf("[+] Unexpected event\n");
             }
+            /* check if the connection is closing */
+			if (evlist[i].events & (EPOLLRDHUP | EPOLLHUP)) {
+				printf("[+] Connection closed with fd: %d\n", evlist[i].data.fd);
+				epoll_ctl(epfd, EPOLL_CTL_DEL,
+					  evlist[i].data.fd, NULL);
+				close(evlist[i].data.fd);
+                numFDs--;
+				continue;
+			}
         }
-    } while(true);
+    } while(numFDs > 0);
     
 
     std::cout << "Server turn off!" << std::endl;
