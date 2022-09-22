@@ -11,11 +11,13 @@
 
 #include"common.h"
 
-#define RECVBUFSIZE 100
+#define RECVBUFSIZE 1024
 #define MAX_EVENTS 2
 
 using json = nlohmann::json;
 static int msg_id = 0;
+static std::string device_name("\0");
+static bool registered = false;
 
 void connectToServer(int clientSock, int serverPort){
     std::string ipAddress = "127.0.0.1";
@@ -33,19 +35,21 @@ void connectToServer(int clientSock, int serverPort){
     }
 }
 
-std::string generate_message(json &j, char* buffer, int buffer_size){
+message::request create_request(std::string destination, 
+                                std::string method,
+                                std::map<std::string, std::string> params){
     message::request req;
-    std::map<std::string, std::string> my_param;
-    std::string msg(buffer);
-    my_param.insert(std::pair<std::string, std::string>("message", msg));
-    req.device_name = "esp1";
-    req.dest = "server";
-    req.params = my_param;
-    req.req_method = "send";
+    req.device_name = device_name;
+    req.dest = destination;
+    req.req_method = method;
+    req.params = params;
     req.id = msg_id;
-    message::serializeRequest(j, req);
-    msg_id ++;
-    return j.dump();
+    return req;
+}
+
+void generate_message(std::string &msg, message::request req){
+    msg = message::serializeRequest(req);
+    msg_id++;
 }
 
 int main(int argc, char *argv[]){
@@ -66,7 +70,7 @@ int main(int argc, char *argv[]){
     echoServerPort = atoi(argv[1]);
     connectToServer(clientSock, echoServerPort);
 
-    /* Starting */
+    /* Starting epoll to watch input and recving*/
     int epfd, event_count, fd;
     size_t bytes_read;
     struct epoll_event ev;
@@ -79,14 +83,6 @@ int main(int argc, char *argv[]){
         std::cerr << "Epoll create failed!" << std::endl;
     }
 
-    /* Add epoll event receiving from server */
-    ev.events = EPOLLIN;
-    ev.data.fd = clientSock;
-    if(epoll_ctl(epfd, EPOLL_CTL_ADD, clientSock, &ev) == -1){
-        std::cerr << "[+] epoll_ctl recving from server failed" << "\n";
-        close(epfd);
-        exit(EXIT_FAILURE); 
-    }
     /* Add epoll event input from user keyboard */
     ev.events = EPOLLIN;
     ev.data.fd = 0;
@@ -95,8 +91,24 @@ int main(int argc, char *argv[]){
         close(epfd);
         exit(EXIT_FAILURE); 
     }
+    
+    /* Add epoll event receiving from server */
+    ev.events = EPOLLIN;
+    ev.data.fd = clientSock;
+    if(epoll_ctl(epfd, EPOLL_CTL_ADD, clientSock, &ev) == -1){
+        std::cerr << "[+] epoll_ctl recving from server failed" << "\n";
+        close(epfd);
+        exit(EXIT_FAILURE); 
+    }
+
+    /* Epoll operation */
     do{
-        printf("About to epoll_wait(), type exit to close client\n");
+        printf("\nAbout to epoll_wait(), type 'exit' to close:\n");
+        if(!registered){
+            printf("Type your name: \n");
+        } else {
+            printf("Type your message: \n");
+        }
         event_count = epoll_wait(epfd, evlist, MAX_EVENTS, -1);
         if(event_count == -1){
             if(errno == EINTR)
@@ -106,26 +118,44 @@ int main(int argc, char *argv[]){
         }
         printf("[+] Event count: %d\n", event_count);
         for(int i=0; i<event_count; i++){
-            printf("[+] Reading file descriptor '%d' with ", evlist[i].data.fd);
+            printf("[+] Reading from file descriptor '%d' with \n", evlist[i].data.fd);
             if(evlist[i].data.fd == 0){
                 bytes_read = read(evlist[i].data.fd, buffer, sizeof(buffer));
-                printf("%zd bytes read.\n", bytes_read);
                 buffer[bytes_read] = '\0';
-                printf("[+] Read %s\n", buffer);
-                json j;
-                std::string message = generate_message(j, buffer, bytes_read);
-                if(send(clientSock, message.c_str(), message.size(), 0) == -1){
-                    printf("[+] Message sent failed!");
-                }
-                if(!strncmp(buffer, "exit\n", 5)) 
+                printf("[+] User > %s\n", buffer);
+                /* Check exit */
+                if(!strncmp(buffer, "exit\n", 5)){
                     running = 0;
+                    close(clientSock);
+                    break;
+                } 
+                
+                /* Sending message */
+                std::string msg;
+                std::map<std::string, std::string> params;
+                if(registered){
+                    params.insert(std::pair<std::string, std::string>("message", std::string(buffer)));
+                    generate_message(msg, create_request("server", "send", params));
+                } else {
+                    device_name = std::string(buffer);
+                    generate_message(msg, create_request("server", "register", params));
+                }
+                /* Sending message */
+                if(send(clientSock, msg.c_str(), msg.size(), 0) == -1){
+                    printf("[+] Message sent failed!");
+                } 
+                printf("[+] Message sent: %s\n", msg.c_str());
             } else if(evlist[i].data.fd == clientSock){
+                /* Reset buffer */
+                bzero(buffer, sizeof(buffer));
                 bytes_read = recv(clientSock, buffer, RECVBUFSIZE, 0);
                 if(bytes_read == -1){
-                    std::cout << "[+] There was a error getting a response from server!\n";
+                    std::cout << "[+] There was an error getting a response from server!\n";
                 } else {
-                    std::cout << "[+] SERVER > " << std::string(buffer, bytes_read) << "\r\n";
+                    printf("[+] Receive > %s\n", buffer);    
                 }
+                message::response resp = message::deserializeResponse(buffer);
+                printf("[+] Message from server: %s\n", resp.message.c_str());
             }
         }
     } while(running);

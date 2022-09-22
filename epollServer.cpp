@@ -9,11 +9,13 @@
 #include<fcntl.h>
 #include<sys/epoll.h>
 #include<errno.h>
-
 #include"common.h"
 
-#define RCVBUFSIZE 512
+#define RCVBUFSIZE 1024
 #define MAX_EVENTS 10
+
+static std::map<std::string, int> known_clients;
+static int numFDs = 0;
 
 void errExit(std::string errorMsg){
     std::cerr << errorMsg << "\n";
@@ -40,8 +42,57 @@ epoll_ctl_add(int epfd, int fd, uint32_t events){
 }
 
 static void 
-handle_message(char* buffer){
-    printf("[+] Receiving message: %s", buffer);
+handle_message(char* buffer, int fd){
+    message::request req = message::deserializeRequest(buffer);
+    message::response resp;
+    resp.device_name = req.device_name;
+    resp.id = req.id;
+    printf("[+] Receive > %s\n", buffer);
+    /* Registration */
+    if(req.req_method.compare("register") == 0)
+    {
+        bool regis_failed = false;
+        auto it = known_clients.find(req.device_name);
+        if(it != known_clients.end()){
+            resp.resp_code = RESP_REGISTRATION_FAILED;
+            resp.message = "Registration failed due to duplicate device name!";
+            regis_failed = true;
+        } else {
+            for(auto it=known_clients.begin(); it!=known_clients.end(); it++){
+                if(it->second == fd){
+                    resp.resp_code = RESP_REGISTRATION_FAILED;
+                    resp.message = "Registration failed due to duplicate file descriptor!";
+                    regis_failed = true; 
+                }
+            }
+        }
+        if(!regis_failed){
+            known_clients.insert(std::pair<std::string, int>(req.device_name, fd));
+            printf("[+] Add 1 client %s with fd %d.\n", req.device_name.c_str(), fd);
+            resp.resp_code = RESP_REGISTRATION_OK;
+            resp.message = "Registration succesfully!";
+        }
+    } 
+    /* Send to other clients */
+    else if(!req.req_method.compare("send") == 0)
+    {
+        printf("[+] Reading send message");
+        if(req.device_name.compare("server") == 0){
+            printf("[+] Message to server: %s", req.dest.c_str());
+        } else {
+            printf("[+] Message to other client %s: %s", req.device_name.c_str(), req.dest.c_str());
+        }
+    } 
+    /* 404 Not Found */
+    else {
+        resp.resp_code = RESP_NOTFOUND;
+        resp.message = "404 Not Found";
+        printf("[+] Bad request method!\n");
+    }
+
+    /* Create Response and send back to client */
+    std::string resp_str = message::serializeResponse(resp);
+    write(fd, resp_str.c_str(), resp_str.size());
 }
 
 int main(int argc, char *argv[]){
@@ -51,7 +102,7 @@ int main(int argc, char *argv[]){
     unsigned short echoServPort;
     unsigned int clntLen;
 
-    int epfd, ready, buf_size, numFDs = 0;
+    int epfd, ready, buf_size;
     struct epoll_event ev;
     struct epoll_event evlist[MAX_EVENTS];
     char buf[RCVBUFSIZE];
@@ -100,10 +151,9 @@ int main(int argc, char *argv[]){
 
     /* 1. Add server socket to interesting list */
     epoll_ctl_add(epfd, serverSocket, EPOLLIN | EPOLLOUT | EPOLLET);
-    
     do {
         /* Fetch up to MAX_EVENT items from the ready list */
-        printf("About to epoll_wait()\n");
+        printf("\nAbout to epoll_wait()\n");
         ready = epoll_wait(epfd, evlist, MAX_EVENTS, -1);
         if(ready == -1){ 
             errExit("epoll_wait() error");
@@ -129,15 +179,16 @@ int main(int argc, char *argv[]){
 				       ntohs(echoClntAddr.sin_port));
                 setnonblocking(clientSocket);
                 epoll_ctl_add(epfd, clientSocket, EPOLLIN | EPOLLET | EPOLLRDHUP | EPOLLHUP);
+
                 numFDs++;
+                printf("[+] Handling %d clients\n", numFDs);
             } else if(evlist[i].events & EPOLLIN){
                 bzero(buf, sizeof(buf));
                 buf_size = read(evlist[i].data.fd, buf, sizeof(buf));
                 if(buf_size <= 0){
                     break;
                 } else {
-                    handle_message(buf);
-                    write(evlist[i].data.fd, "200\0", 4);
+                    handle_message(buf, evlist[i].data.fd);
                 }
             } else {
                 printf("[+] Unexpected event\n");
@@ -149,6 +200,7 @@ int main(int argc, char *argv[]){
 					  evlist[i].data.fd, NULL);
 				close(evlist[i].data.fd);
                 numFDs--;
+                printf("[+] Handling %d clients\n", numFDs);
 				continue;
 			}
         }
