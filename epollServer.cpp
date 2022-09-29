@@ -45,8 +45,6 @@ static void
 handle_message(char* buffer, int fd){
     message::request req = message::deserializeRequest(buffer);
     message::response resp;
-    resp.device_name = req.device_name;
-    resp.id = req.id;
     printf("[+] Receive > %s\n", buffer);
     /* Registration */
     if(req.req_method.compare("register") == 0)
@@ -68,29 +66,53 @@ handle_message(char* buffer, int fd){
         }
         if(!regis_failed){
             known_clients.insert(std::pair<std::string, int>(req.device_name, fd));
-            printf("[+] Add 1 client %s with fd %d.\n", req.device_name.c_str(), fd);
+            printf("[+] Client id: %s with fd %d registered!\n", req.device_name.c_str(), fd);
             resp.resp_code = RESP_REGISTRATION_OK;
             resp.message = "Registration succesfully!";
         }
     } 
     /* Send to other clients */
-    else if(!req.req_method.compare("send") == 0)
+    else if(req.req_method.compare("send") == 0)
     {
-        printf("[+] Reading send message");
-        if(req.device_name.compare("server") == 0){
-            printf("[+] Message to server: %s", req.dest.c_str());
+        printf("[+] Reading send message\n");
+        if(req.dest.compare("server") == 0){
+            printf("[+] Message to server\n");
+            for(auto it = req.params.begin(); it!=req.params.end(); it++){
+                printf("\tKey: %s | Value: %s\n", it->first.c_str(), it->second.c_str());
+            }
+            resp.resp_code = RESP_OK;
+            resp.message = "ACK";
         } else {
-            printf("[+] Message to other client %s: %s", req.device_name.c_str(), req.dest.c_str());
-        }
+            printf("[+] Message to other client: %s", req.dest.c_str());
+            //Check in the list client name !
+            if(known_clients.count(req.dest) > 0){
+                resp.resp_code = RESP_BAD_METHOD;
+                resp.message = "Client id not exsists, please send to another client!";
+            } else {
+                //create noti for dest client
+                message::notification noti;
+                noti.from = req.device_name;
+                noti.to = req.dest;
+                noti.message = req.params;
+                std::string noti_str = message::serializeNotification(noti);
+                //Fire and forget :D
+                write(known_clients.at(req.dest), noti_str.c_str(), noti_str.size());
+                //Response back
+                resp.message = "Message sent!";
+                resp.resp_code = RESP_OK;
+            }
+        } 
     } 
     /* 404 Not Found */
     else {
         resp.resp_code = RESP_NOTFOUND;
-        resp.message = "404 Not Found";
-        printf("[+] Bad request method!\n");
+        resp.message = "404 Method not found";
+        printf("[+] Request method not found!\n");
     }
-
+    
     /* Create Response and send back to client */
+    resp.device_name = req.device_name;
+    resp.id = req.id;
     std::string resp_str = message::serializeResponse(resp);
     write(fd, resp_str.c_str(), resp_str.size());
 }
@@ -185,7 +207,14 @@ int main(int argc, char *argv[]){
             } else if(evlist[i].events & EPOLLIN){
                 bzero(buf, sizeof(buf));
                 buf_size = read(evlist[i].data.fd, buf, sizeof(buf));
+                //if empty message => client disconnect!
                 if(buf_size <= 0){
+                    printf("[+] Disconnecting client with fd: %d!\n", evlist[i].data.fd);
+                    for(auto it=known_clients.begin(); it!=known_clients.end(); it++){
+                        if(it->second == evlist[i].data.fd){
+                            known_clients.erase(it->first);
+                        }
+                    }
                     break;
                 } else {
                     handle_message(buf, evlist[i].data.fd);

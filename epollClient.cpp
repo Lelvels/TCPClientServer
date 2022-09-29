@@ -154,8 +154,37 @@ int main(int argc, char *argv[]){
                 } else {
                     printf("[+] Receive > %s\n", buffer);    
                 }
-                message::response resp = message::deserializeResponse(buffer);
-                printf("[+] Message from server: %s\n", resp.message.c_str());
+                //Reconize if incoming message a resp or a notification
+                if(json::parse(buffer).count("id") < 1){
+                    message::notification noti = message::deserializeNotification(buffer);
+                    if(noti.to.compare(device_name) == 0){
+                        printf("[+] New notification from %s!\n", noti.from.c_str());
+                        printf("[+] Notification message:\n");
+                        for(auto it = noti.message.begin(); it!=noti.message.end(); it++){
+                            printf("\tKey: %s | Value: %s\n", it->first.c_str(), it->second.c_str());
+                        }
+                    } else {
+                        printf("[+] Wrong address notification from %s", noti.from.c_str());
+                    }
+                } else {
+                    message::response resp = message::deserializeResponse(buffer);
+                    if(resp.resp_code == RESP_REGISTRATION_FAILED){
+                        printf("[+] Registration failed: %s", resp.message.c_str());
+                    } else if(resp.resp_code == RESP_REGISTRATION_OK){
+                        if(!registered){
+                            registered = true;
+                            printf("[+] Registration success!");
+                        } else {
+                            std::cout << "[+] Unusual registration detected! Closing program!" << std::endl;
+                            exit(EXIT_FAILURE);
+                        }
+                    } else if (resp.resp_code == RESP_OK) {
+                        printf("[+] Message sent to destination!\n");
+                    } else {
+                        printf("[+] Bad method!\n");
+                    }
+                }
+                
             }
         }
     } while(running);
